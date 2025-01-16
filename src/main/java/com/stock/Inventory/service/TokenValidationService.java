@@ -10,6 +10,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.concurrent.CompletableFuture;
+
 @Service
 @RequiredArgsConstructor
 public class TokenValidationService {
@@ -19,14 +21,22 @@ public class TokenValidationService {
     private final RabbitTemplate rabbitTemplate;
     private final ObjectMapper objectMapper;
 
-    public boolean validateToken(String token, UserRole role) {
+    public CompletableFuture<Boolean> validateToken(String token, UserRole role) {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
         try {
             String jsonRequest = createTokenValidationRequest(token, role);
-            String response = sendValidationRequest(jsonRequest);
-            return "VALID".equals(response);
+            Object response = rabbitTemplate.convertSendAndReceive("token.validation", jsonRequest);
+
+            if (response instanceof String) {
+                handleResponse((String) response, future);
+            } else {
+                future.completeExceptionally(new RuntimeException("Resposta inesperada do RabbitMQ"));
+            }
+
         } catch (Exception e) {
-            throw new RuntimeException("Erro ao validar o token:\n", e);
+            future.completeExceptionally(new RuntimeException("Erro ao validar o token", e));
         }
+        return future;
     }
 
     private String createTokenValidationRequest(String token, UserRole role) throws JsonProcessingException {
@@ -36,8 +46,17 @@ public class TokenValidationService {
         return objectMapper.writeValueAsString(request);
     }
 
-    private String sendValidationRequest(String jsonRequest) {
-        return (String) rabbitTemplate.convertSendAndReceive("token.validation", jsonRequest);
+    private void handleResponse(String response, CompletableFuture<Boolean> future) {
+        try {
+            if ("VALID".equals(response)) {
+                logger.info("Token válido recebido.");
+                future.complete(true);
+            } else {
+                logger.warn("Token inválido.");
+                future.complete(false);
+            }
+        } catch (Exception e) {
+            future.completeExceptionally(new RuntimeException("Erro ao processar a resposta", e));
+        }
     }
-
 }
